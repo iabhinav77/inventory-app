@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { createClient } from '@supabase/supabase-js';
 
-// Initialize Supabase client
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey);
@@ -83,13 +82,119 @@ const InventoryApp = () => {
     }
   };
 
-  // ============================================
-  // SHOPIFY INTEGRATION FUNCTIONS
-  // ============================================
-
-  const syncFromShopify = async () => {
+  // INITIAL SYNC: Pull all products from Shopify
+  const initialSyncFromShopify = async () => {
     if (!shopifyConnected) {
-      alert('Shopify not connected. Please configure Shopify credentials in Vercel environment variables.');
+      alert('Shopify not connected.');
+      return;
+    }
+
+    if (!confirm('This will import ALL products from Shopify. Existing products will be updated. Continue?')) {
+      return;
+    }
+
+    try {
+      setSyncing(true);
+      const log = [];
+      
+      log.push('🔍 Fetching all products from Shopify...');
+      
+      const response = await fetch('/api/shopify?action=getAllProducts');
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to fetch products');
+      }
+
+      const data = await response.json();
+      const shopifyProducts = data.products || [];
+      
+      log.push(`📦 Found ${shopifyProducts.length} products in Shopify`);
+
+      let createdCount = 0;
+      let updatedCount = 0;
+      let skippedCount = 0;
+
+      for (const shopifyProduct of shopifyProducts) {
+        const variant = shopifyProduct.variants[0];
+        
+        const productName = shopifyProduct.title;
+        const sku = variant.sku || `SHOPIFY-${shopifyProduct.id}`;
+        const quantity = variant.inventory_quantity || 0;
+
+        const { data: existing } = await supabase
+          .from('inventory')
+          .select('*')
+          .eq('sku', sku)
+          .single();
+
+        if (existing) {
+          await supabase
+            .from('inventory')
+            .update({ 
+              sellable_stock: quantity,
+              product_name: productName 
+            })
+            .eq('sku', sku);
+          
+          log.push(`✅ Updated: ${productName} (${sku}) - Stock: ${quantity}`);
+          updatedCount++;
+        } else {
+          const newProduct = {
+            product_name: productName,
+            local_name: productName,
+            sku: sku,
+            sellable_stock: quantity,
+            unusable_stock: 0,
+            hold_stock: 0,
+            design: shopifyProduct.product_type || 'Saree',
+            color: '',
+            reorder_level: 5,
+            supplier: ''
+          };
+
+          const { error } = await supabase
+            .from('inventory')
+            .insert([newProduct]);
+
+          if (error) {
+            log.push(`❌ Failed: ${productName} - ${error.message}`);
+            skippedCount++;
+          } else {
+            log.push(`✅ Created: ${productName} (${sku}) - Stock: ${quantity}`);
+            createdCount++;
+          }
+        }
+
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+
+      saveLastSyncTime();
+      setImportLog(log);
+      
+      let message = `✅ Initial sync complete!\n\n`;
+      message += `📥 Created: ${createdCount} products\n`;
+      message += `🔄 Updated: ${updatedCount} products\n`;
+      if (skippedCount > 0) {
+        message += `⚠️ Skipped: ${skippedCount} products`;
+      }
+      
+      alert(message);
+      fetchProducts();
+      
+    } catch (error) {
+      console.error('Error syncing products:', error);
+      alert(`Error: ${error.message}`);
+      setImportLog([`❌ Error: ${error.message}`]);
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  // REGULAR SYNC: Pull orders and deduct inventory
+  const syncOrdersFromShopify = async () => {
+    if (!shopifyConnected) {
+      alert('Shopify not connected.');
       return;
     }
 
@@ -107,7 +212,7 @@ const InventoryApp = () => {
 
       if (!response.ok) {
         const errorData = await response.json();
-        throw new Error(errorData.error || `API error: ${response.status}`);
+        throw new Error(errorData.error || 'Failed to fetch orders');
       }
 
       const data = await response.json();
@@ -153,10 +258,10 @@ const InventoryApp = () => {
               .update({ sellable_stock: newStock })
               .eq('id', product.id);
             
-            log.push(`✅ ${product.product_name}: Sold ${quantity}, New stock: ${newStock}`);
+            log.push(`✅ ${product.product_name}: Sold ${quantity}, Remaining: ${newStock}`);
             processedCount++;
           } else {
-            log.push(`❌ "${productName}" (SKU: ${sku || 'none'}): Not found in inventory`);
+            log.push(`❌ "${productName}" (SKU: ${sku || 'none'}): Not in database`);
             notFoundCount++;
           }
         }
@@ -165,18 +270,18 @@ const InventoryApp = () => {
       saveLastSyncTime();
       setImportLog(log);
       
-      let message = `✅ Sync complete!\n\n`;
+      let message = `✅ Order sync complete!\n\n`;
       message += `📥 Processed ${processedCount} items from ${orders.length} orders\n`;
       if (notFoundCount > 0) {
-        message += `⚠️ ${notFoundCount} items not found in inventory`;
+        message += `⚠️ ${notFoundCount} items not found`;
       }
       
       alert(message);
       fetchProducts();
       
     } catch (error) {
-      console.error('Error syncing from Shopify:', error);
-      alert(`Error syncing from Shopify: ${error.message}\n\nCheck console for details.`);
+      console.error('Error syncing orders:', error);
+      alert(`Error: ${error.message}`);
       setImportLog([`❌ Error: ${error.message}`]);
     } finally {
       setSyncing(false);
@@ -184,47 +289,30 @@ const InventoryApp = () => {
   };
 
   const pushToShopify = async (product) => {
-    if (!shopifyConnected) {
-      alert('Shopify not connected.');
-      return;
-    }
+    if (!shopifyConnected) return;
 
     try {
       const searchResponse = await fetch(`/api/shopify?action=getProducts&title=${encodeURIComponent(product.product_name)}`);
-      
-      if (!searchResponse.ok) {
-        throw new Error('Failed to find product in Shopify');
-      }
+      if (!searchResponse.ok) throw new Error('Failed to find product');
 
       const searchData = await searchResponse.json();
       const shopifyProducts = searchData.products || [];
-
-      if (shopifyProducts.length === 0) {
-        throw new Error('Product not found in Shopify');
-      }
+      if (shopifyProducts.length === 0) throw new Error('Product not found in Shopify');
 
       const shopifyProduct = shopifyProducts[0];
       const variant = shopifyProduct.variants[0];
       const inventoryItemId = variant.inventory_item_id;
       
       const locationsResponse = await fetch('/api/shopify?action=getLocations');
-      
-      if (!locationsResponse.ok) {
-        throw new Error('Failed to get Shopify locations');
-      }
+      if (!locationsResponse.ok) throw new Error('Failed to get locations');
       
       const locationsData = await locationsResponse.json();
       const locationId = locationsData.locations[0]?.id;
-
-      if (!locationId) {
-        throw new Error('No location found in Shopify');
-      }
+      if (!locationId) throw new Error('No location found');
 
       const updateResponse = await fetch('/api/shopify?action=updateInventory', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           locationId: locationId,
           inventoryItemId: inventoryItemId,
@@ -232,26 +320,16 @@ const InventoryApp = () => {
         }),
       });
 
-      if (!updateResponse.ok) {
-        throw new Error('Failed to update inventory in Shopify');
-      }
-
+      if (!updateResponse.ok) throw new Error('Failed to update inventory');
       return true;
     } catch (error) {
-      console.error('Error pushing to Shopify:', error);
       throw error;
     }
   };
 
   const bulkPushToShopify = async () => {
-    if (!shopifyConnected) {
-      alert('Shopify not connected.');
-      return;
-    }
-
-    if (!confirm('This will update ALL products in Shopify with your current inventory levels. Continue?')) {
-      return;
-    }
+    if (!shopifyConnected) return;
+    if (!confirm('Update ALL products in Shopify? Continue?')) return;
 
     try {
       setSyncing(true);
@@ -262,57 +340,40 @@ const InventoryApp = () => {
       for (const product of products) {
         try {
           await pushToShopify(product);
-          log.push(`✅ ${product.product_name}: Updated to ${product.sellable_stock} units`);
+          log.push(`✅ ${product.product_name}: ${product.sellable_stock} units`);
           successCount++;
         } catch (error) {
           log.push(`❌ ${product.product_name}: ${error.message}`);
           failCount++;
         }
-        
         await new Promise(resolve => setTimeout(resolve, 500));
       }
 
       setImportLog(log);
-      alert(`Push complete!\n\n✅ Success: ${successCount}\n❌ Failed: ${failCount}`);
-      
+      alert(`✅ Success: ${successCount}\n❌ Failed: ${failCount}`);
     } catch (error) {
-      console.error('Error bulk pushing to Shopify:', error);
       alert(`Error: ${error.message}`);
     } finally {
       setSyncing(false);
     }
   };
 
-  // ============================================
-  // END SHOPIFY INTEGRATION
-  // ============================================
-
   const handleSubmit = async (e) => {
     e.preventDefault();
-    
     try {
       if (editingProduct) {
-        const { error } = await supabase
-          .from('inventory')
-          .update(formData)
-          .eq('id', editingProduct.id);
-        
+        const { error } = await supabase.from('inventory').update(formData).eq('id', editingProduct.id);
         if (error) throw error;
-        alert('Product updated successfully!');
+        alert('Product updated!');
       } else {
-        const { error } = await supabase
-          .from('inventory')
-          .insert([formData]);
-        
+        const { error } = await supabase.from('inventory').insert([formData]);
         if (error) throw error;
-        alert('Product added successfully!');
+        alert('Product added!');
       }
-      
       fetchProducts();
       resetForm();
     } catch (error) {
-      console.error('Error saving product:', error);
-      alert('Error saving product. Check console for details.');
+      alert('Error saving product.');
     }
   };
 
@@ -329,20 +390,11 @@ const InventoryApp = () => {
           return matches ? matches.map(cell => cell.replace(/^"|"$/g, '').trim()) : [];
         });
         
-        const headers = rows[0];
         const dataRows = rows.slice(1).filter(row => row.length > 1 && row.some(cell => cell));
-        
-        if (dataRows.length === 0) {
-          alert('No data found in CSV file.');
-          return;
-        }
-        
         const log = [];
         const productsToImport = [];
         
         for (const row of dataRows) {
-          if (row.length < headers.length) continue;
-          
           const product = {
             product_name: row[0] || '',
             local_name: row[1] || '',
@@ -356,101 +408,57 @@ const InventoryApp = () => {
             supplier: row[9] || ''
           };
           
-          if (product.sku || product.product_name) {
-            const { data: existing } = await supabase
-              .from('inventory')
-              .select('*')
-              .eq('sku', product.sku)
-              .single();
+          if (product.sku) {
+            const { data: existing } = await supabase.from('inventory').select('*').eq('sku', product.sku).single();
             
             if (existing && importMode === 'add') {
-              const updated = {
-                sellable_stock: existing.sellable_stock + product.sellable_stock,
-                unusable_stock: existing.unusable_stock + product.unusable_stock,
-                hold_stock: existing.hold_stock + product.hold_stock
-              };
-              
-              await supabase
-                .from('inventory')
-                .update(updated)
-                .eq('sku', product.sku);
-              
-              log.push(`✅ Updated ${product.sku}: Added stocks`);
-            } else if (existing && importMode === 'replace') {
-              await supabase
-                .from('inventory')
-                .update(product)
-                .eq('sku', product.sku);
-              
-              log.push(`✅ Replaced ${product.sku}`);
-            } else {
+              await supabase.from('inventory').update({
+                sellable_stock: existing.sellable_stock + product.sellable_stock
+              }).eq('sku', product.sku);
+              log.push(`✅ Updated ${product.sku}`);
+            } else if (!existing) {
               productsToImport.push(product);
-              log.push(`✅ New product: ${product.sku || product.product_name}`);
+              log.push(`✅ New: ${product.sku}`);
             }
           }
         }
         
         if (productsToImport.length > 0) {
-          const { error } = await supabase
-            .from('inventory')
-            .insert(productsToImport);
-          
-          if (error) throw error;
+          await supabase.from('inventory').insert(productsToImport);
         }
         
         setImportLog(log);
-        alert(`Successfully imported ${dataRows.length} products!`);
+        alert(`Imported ${dataRows.length} products!`);
         fetchProducts();
         setShowBulkImport(false);
       } catch (error) {
-        console.error('Error importing:', error);
-        alert('Error importing CSV. Check console for details.');
+        alert('Error importing CSV.');
       }
     };
-    
     reader.readAsText(file);
   };
 
   const handleDelete = async (id) => {
-    if (!confirm('Are you sure you want to delete this product?')) return;
-    
+    if (!confirm('Delete this product?')) return;
     try {
-      const { error } = await supabase
-        .from('inventory')
-        .delete()
-        .eq('id', id);
-      
-      if (error) throw error;
+      await supabase.from('inventory').delete().eq('id', id);
       fetchProducts();
-      alert('Product deleted successfully!');
+      alert('Deleted!');
     } catch (error) {
-      console.error('Error deleting:', error);
-      alert('Error deleting product.');
+      alert('Error deleting.');
     }
   };
 
   const handleBulkDelete = async () => {
-    if (selectedProducts.size === 0) {
-      alert('No products selected');
-      return;
-    }
-    
-    if (!confirm(`Delete ${selectedProducts.size} selected products?`)) return;
-    
+    if (selectedProducts.size === 0) return;
+    if (!confirm(`Delete ${selectedProducts.size} products?`)) return;
     try {
-      const ids = Array.from(selectedProducts);
-      const { error } = await supabase
-        .from('inventory')
-        .delete()
-        .in('id', ids);
-      
-      if (error) throw error;
+      await supabase.from('inventory').delete().in('id', Array.from(selectedProducts));
       setSelectedProducts(new Set());
       fetchProducts();
-      alert('Products deleted successfully!');
+      alert('Deleted!');
     } catch (error) {
-      console.error('Error bulk deleting:', error);
-      alert('Error deleting products.');
+      alert('Error deleting.');
     }
   };
 
@@ -462,16 +470,9 @@ const InventoryApp = () => {
 
   const resetForm = () => {
     setFormData({
-      product_name: '',
-      local_name: '',
-      sku: '',
-      sellable_stock: 0,
-      unusable_stock: 0,
-      hold_stock: 0,
-      design: '',
-      color: '',
-      reorder_level: 5,
-      supplier: ''
+      product_name: '', local_name: '', sku: '', sellable_stock: 0,
+      unusable_stock: 0, hold_stock: 0, design: '', color: '',
+      reorder_level: 5, supplier: ''
     });
     setEditingProduct(null);
     setShowForm(false);
@@ -484,25 +485,14 @@ const InventoryApp = () => {
     filteredProducts.forEach(p => {
       const total = p.sellable_stock + p.unusable_stock + p.hold_stock;
       const status = getStatus(p);
-      const row = [
-        `"${p.product_name}"`,
-        `"${p.local_name}"`,
-        p.sku,
-        p.sellable_stock,
-        p.unusable_stock,
-        p.hold_stock,
-        total,
-        `"${p.design}"`,
-        `"${p.color}"`,
-        p.reorder_level,
-        status,
-        `"${p.supplier || ''}"`
-      ];
-      csvRows.push(row.join(','));
+      csvRows.push([
+        `"${p.product_name}"`, `"${p.local_name}"`, p.sku,
+        p.sellable_stock, p.unusable_stock, p.hold_stock, total,
+        `"${p.design}"`, `"${p.color}"`, p.reorder_level, status, `"${p.supplier || ''}"`
+      ].join(','));
     });
     
-    const csvContent = csvRows.join('\n');
-    const blob = new Blob([csvContent], { type: 'text/csv' });
+    const blob = new Blob([csvRows.join('\n')], { type: 'text/csv' });
     const url = window.URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -521,15 +511,9 @@ const InventoryApp = () => {
     const matchesSearch = 
       p.product_name.toLowerCase().includes(searchTerm.toLowerCase()) ||
       p.local_name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      p.sku.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      p.design.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      p.color.toLowerCase().includes(searchTerm.toLowerCase());
-    
-    const matchesLowStock = !filterLowStock || 
-      (p.sellable_stock <= p.reorder_level * 1.25);
-    
+      p.sku.toLowerCase().includes(searchTerm.toLowerCase());
+    const matchesLowStock = !filterLowStock || (p.sellable_stock <= p.reorder_level * 1.25);
     const matchesOnHold = !filterOnHold || p.hold_stock > 0;
-    
     return matchesSearch && matchesLowStock && matchesOnHold;
   });
 
@@ -549,8 +533,7 @@ const InventoryApp = () => {
     if (minutes < 60) return `${minutes}m ago`;
     const hours = Math.floor(minutes / 60);
     if (hours < 24) return `${hours}h ago`;
-    const days = Math.floor(hours / 24);
-    return `${days}d ago`;
+    return `${Math.floor(hours / 24)}d ago`;
   };
 
   return (
@@ -606,21 +589,33 @@ const InventoryApp = () => {
 
         {shopifyConnected && (
           <>
-            <button 
-              onClick={syncFromShopify} 
-              disabled={syncing}
-              style={{ padding: '10px 20px', background: syncing ? '#9CA3AF' : '#2563EB', color: 'white', border: 'none', borderRadius: '6px', cursor: syncing ? 'not-allowed' : 'pointer', fontWeight: '500' }}
-            >
-              {syncing ? '⏳ Syncing...' : '🔄 Sync from Shopify'}
-            </button>
-            
-            <button 
-              onClick={bulkPushToShopify} 
-              disabled={syncing}
-              style={{ padding: '10px 20px', background: syncing ? '#9CA3AF' : '#7C3AED', color: 'white', border: 'none', borderRadius: '6px', cursor: syncing ? 'not-allowed' : 'pointer', fontWeight: '500' }}
-            >
-              {syncing ? '⏳ Pushing...' : '↗️ Push to Shopify'}
-            </button>
+            {products.length === 0 ? (
+              <button 
+                onClick={initialSyncFromShopify} 
+                disabled={syncing}
+                style={{ padding: '10px 20px', background: syncing ? '#9CA3AF' : '#059669', color: 'white', border: 'none', borderRadius: '6px', cursor: syncing ? 'not-allowed' : 'pointer', fontWeight: '500' }}
+              >
+                {syncing ? '⏳ Syncing...' : '⬇️ Initial Sync (Import All Products)'}
+              </button>
+            ) : (
+              <>
+                <button 
+                  onClick={syncOrdersFromShopify} 
+                  disabled={syncing}
+                  style={{ padding: '10px 20px', background: syncing ? '#9CA3AF' : '#2563EB', color: 'white', border: 'none', borderRadius: '6px', cursor: syncing ? 'not-allowed' : 'pointer', fontWeight: '500' }}
+                >
+                  {syncing ? '⏳ Syncing...' : '🔄 Sync Orders'}
+                </button>
+                
+                <button 
+                  onClick={bulkPushToShopify} 
+                  disabled={syncing}
+                  style={{ padding: '10px 20px', background: syncing ? '#9CA3AF' : '#7C3AED', color: 'white', border: 'none', borderRadius: '6px', cursor: syncing ? 'not-allowed' : 'pointer', fontWeight: '500' }}
+                >
+                  {syncing ? '⏳ Pushing...' : '↗️ Push to Shopify'}
+                </button>
+              </>
+            )}
           </>
         )}
         
@@ -649,22 +644,12 @@ const InventoryApp = () => {
         />
         
         <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', userSelect: 'none' }}>
-          <input
-            type="checkbox"
-            checked={filterLowStock}
-            onChange={(e) => setFilterLowStock(e.target.checked)}
-            style={{ width: '18px', height: '18px', cursor: 'pointer' }}
-          />
+          <input type="checkbox" checked={filterLowStock} onChange={(e) => setFilterLowStock(e.target.checked)} style={{ width: '18px', height: '18px', cursor: 'pointer' }} />
           <span>Low Stock Only</span>
         </label>
         
         <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', userSelect: 'none' }}>
-          <input
-            type="checkbox"
-            checked={filterOnHold}
-            onChange={(e) => setFilterOnHold(e.target.checked)}
-            style={{ width: '18px', height: '18px', cursor: 'pointer' }}
-          />
+          <input type="checkbox" checked={filterOnHold} onChange={(e) => setFilterOnHold(e.target.checked)} style={{ width: '18px', height: '18px', cursor: 'pointer' }} />
           <span>On Hold Only</span>
         </label>
       </div>
@@ -674,116 +659,51 @@ const InventoryApp = () => {
           <h2 style={{ marginTop: 0, marginBottom: '20px', fontSize: '20px' }}>{editingProduct ? 'Edit Product' : 'Add New Product'}</h2>
           <form onSubmit={handleSubmit}>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: '15px' }}>
-              <div>
-                <label style={{ display: 'block', marginBottom: '5px', fontWeight: '500', fontSize: '14px' }}>Product Name *</label>
-                <input
-                  type="text"
-                  required
-                  value={formData.product_name}
-                  onChange={(e) => setFormData({...formData, product_name: e.target.value})}
-                  style={{ width: '100%', padding: '10px', border: '2px solid #E5E7EB', borderRadius: '6px', fontSize: '14px' }}
-                />
-              </div>
+              {['product_name', 'local_name', 'sku'].map(field => (
+                <div key={field}>
+                  <label style={{ display: 'block', marginBottom: '5px', fontWeight: '500', fontSize: '14px' }}>
+                    {field.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase())} *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={formData[field]}
+                    onChange={(e) => setFormData({...formData, [field]: e.target.value})}
+                    style={{ width: '100%', padding: '10px', border: '2px solid #E5E7EB', borderRadius: '6px', fontSize: '14px' }}
+                  />
+                </div>
+              ))}
               
-              <div>
-                <label style={{ display: 'block', marginBottom: '5px', fontWeight: '500', fontSize: '14px' }}>Product Local Name *</label>
-                <input
-                  type="text"
-                  required
-                  value={formData.local_name}
-                  onChange={(e) => setFormData({...formData, local_name: e.target.value})}
-                  style={{ width: '100%', padding: '10px', border: '2px solid #E5E7EB', borderRadius: '6px', fontSize: '14px' }}
-                />
-              </div>
+              {['sellable_stock', 'unusable_stock', 'hold_stock', 'reorder_level'].map(field => (
+                <div key={field}>
+                  <label style={{ display: 'block', marginBottom: '5px', fontWeight: '500', fontSize: '14px' }}>
+                    {field.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase())} *
+                  </label>
+                  <input
+                    type="number"
+                    required={field === 'sellable_stock' || field === 'reorder_level'}
+                    min="0"
+                    value={formData[field]}
+                    onChange={(e) => setFormData({...formData, [field]: parseInt(e.target.value) || 0})}
+                    style={{ width: '100%', padding: '10px', border: '2px solid #E5E7EB', borderRadius: '6px', fontSize: '14px' }}
+                  />
+                </div>
+              ))}
               
-              <div>
-                <label style={{ display: 'block', marginBottom: '5px', fontWeight: '500', fontSize: '14px' }}>SKU *</label>
-                <input
-                  type="text"
-                  required
-                  value={formData.sku}
-                  onChange={(e) => setFormData({...formData, sku: e.target.value})}
-                  style={{ width: '100%', padding: '10px', border: '2px solid #E5E7EB', borderRadius: '6px', fontSize: '14px' }}
-                />
-              </div>
-              
-              <div>
-                <label style={{ display: 'block', marginBottom: '5px', fontWeight: '500', fontSize: '14px' }}>Sellable Stock *</label>
-                <input
-                  type="number"
-                  required
-                  min="0"
-                  value={formData.sellable_stock}
-                  onChange={(e) => setFormData({...formData, sellable_stock: parseInt(e.target.value) || 0})}
-                  style={{ width: '100%', padding: '10px', border: '2px solid #E5E7EB', borderRadius: '6px', fontSize: '14px' }}
-                />
-              </div>
-              
-              <div>
-                <label style={{ display: 'block', marginBottom: '5px', fontWeight: '500', fontSize: '14px' }}>Unusable Stock</label>
-                <input
-                  type="number"
-                  min="0"
-                  value={formData.unusable_stock}
-                  onChange={(e) => setFormData({...formData, unusable_stock: parseInt(e.target.value) || 0})}
-                  style={{ width: '100%', padding: '10px', border: '2px solid #E5E7EB', borderRadius: '6px', fontSize: '14px' }}
-                />
-              </div>
-              
-              <div>
-                <label style={{ display: 'block', marginBottom: '5px', fontWeight: '500', fontSize: '14px' }}>Hold Stock</label>
-                <input
-                  type="number"
-                  min="0"
-                  value={formData.hold_stock}
-                  onChange={(e) => setFormData({...formData, hold_stock: parseInt(e.target.value) || 0})}
-                  style={{ width: '100%', padding: '10px', border: '2px solid #E5E7EB', borderRadius: '6px', fontSize: '14px' }}
-                />
-              </div>
-              
-              <div>
-                <label style={{ display: 'block', marginBottom: '5px', fontWeight: '500', fontSize: '14px' }}>Design *</label>
-                <input
-                  type="text"
-                  required
-                  value={formData.design}
-                  onChange={(e) => setFormData({...formData, design: e.target.value})}
-                  style={{ width: '100%', padding: '10px', border: '2px solid #E5E7EB', borderRadius: '6px', fontSize: '14px' }}
-                />
-              </div>
-              
-              <div>
-                <label style={{ display: 'block', marginBottom: '5px', fontWeight: '500', fontSize: '14px' }}>Color *</label>
-                <input
-                  type="text"
-                  required
-                  value={formData.color}
-                  onChange={(e) => setFormData({...formData, color: e.target.value})}
-                  style={{ width: '100%', padding: '10px', border: '2px solid #E5E7EB', borderRadius: '6px', fontSize: '14px' }}
-                />
-              </div>
-              
-              <div>
-                <label style={{ display: 'block', marginBottom: '5px', fontWeight: '500', fontSize: '14px' }}>Reorder Level *</label>
-                <input
-                  type="number"
-                  required
-                  min="0"
-                  value={formData.reorder_level}
-                  onChange={(e) => setFormData({...formData, reorder_level: parseInt(e.target.value) || 5})}
-                  style={{ width: '100%', padding: '10px', border: '2px solid #E5E7EB', borderRadius: '6px', fontSize: '14px' }}
-                />
-              </div>
-              
-              <div>
-                <label style={{ display: 'block', marginBottom: '5px', fontWeight: '500', fontSize: '14px' }}>Supplier</label>
-                <input
-                  type="text"
-                  value={formData.supplier}
-                  onChange={(e) => setFormData({...formData, supplier: e.target.value})}
-                  style={{ width: '100%', padding: '10px', border: '2px solid #E5E7EB', borderRadius: '6px', fontSize: '14px' }}
-                />
-              </div>
+              {['design', 'color', 'supplier'].map(field => (
+                <div key={field}>
+                  <label style={{ display: 'block', marginBottom: '5px', fontWeight: '500', fontSize: '14px' }}>
+                    {field.charAt(0).toUpperCase() + field.slice(1)} {field !== 'supplier' && '*'}
+                  </label>
+                  <input
+                    type="text"
+                    required={field !== 'supplier'}
+                    value={formData[field]}
+                    onChange={(e) => setFormData({...formData, [field]: e.target.value})}
+                    style={{ width: '100%', padding: '10px', border: '2px solid #E5E7EB', borderRadius: '6px', fontSize: '14px' }}
+                  />
+                </div>
+              ))}
             </div>
             
             <div style={{ marginTop: '20px', display: 'flex', gap: '10px' }}>
@@ -801,62 +721,33 @@ const InventoryApp = () => {
       {showBulkImport && (
         <div style={{ background: '#EFF6FF', padding: '25px', borderRadius: '8px', marginBottom: '25px', border: '2px solid #BFDBFE' }}>
           <h2 style={{ marginTop: 0, marginBottom: '15px', fontSize: '20px', color: '#1E40AF' }}>📦 Bulk Import from CSV</h2>
-          
           <div style={{ marginBottom: '20px' }}>
             <label style={{ fontWeight: '500', marginBottom: '10px', display: 'block' }}>Import Mode:</label>
             <div style={{ display: 'flex', gap: '15px' }}>
               <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
-                <input
-                  type="radio"
-                  name="importMode"
-                  value="add"
-                  checked={importMode === 'add'}
-                  onChange={(e) => setImportMode(e.target.value)}
-                  style={{ cursor: 'pointer' }}
-                />
-                <span><strong>ADD</strong> - Add quantities to existing stock</span>
+                <input type="radio" name="importMode" value="add" checked={importMode === 'add'} onChange={(e) => setImportMode(e.target.value)} />
+                <span><strong>ADD</strong> - Add to existing</span>
               </label>
               <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
-                <input
-                  type="radio"
-                  name="importMode"
-                  value="replace"
-                  checked={importMode === 'replace'}
-                  onChange={(e) => setImportMode(e.target.value)}
-                  style={{ cursor: 'pointer' }}
-                />
-                <span><strong>REPLACE</strong> - Overwrite existing quantities</span>
+                <input type="radio" name="importMode" value="replace" checked={importMode === 'replace'} onChange={(e) => setImportMode(e.target.value)} />
+                <span><strong>REPLACE</strong> - Overwrite</span>
               </label>
             </div>
           </div>
-          
-          <div>
-            <label style={{ display: 'block', marginBottom: '10px', fontWeight: '500' }}>
-              Upload CSV file (Product Name, Local Name, SKU, Sellable Stock, Unusable Stock, Hold Stock, Design, Color, Reorder Level, Supplier)
-            </label>
-            <input
-              type="file"
-              accept=".csv"
-              onChange={handleBulkImport}
-              style={{ padding: '10px', border: '2px solid #BFDBFE', borderRadius: '6px', background: 'white', width: '100%' }}
-            />
-          </div>
-          
+          <input type="file" accept=".csv" onChange={handleBulkImport} style={{ padding: '10px', border: '2px solid #BFDBFE', borderRadius: '6px', background: 'white', width: '100%' }} />
           {importLog.length > 0 && (
             <div style={{ marginTop: '20px', background: 'white', padding: '15px', borderRadius: '6px', maxHeight: '200px', overflowY: 'auto', fontSize: '13px', fontFamily: 'monospace' }}>
-              {importLog.map((log, i) => (
-                <div key={i} style={{ marginBottom: '5px' }}>{log}</div>
-              ))}
+              {importLog.map((log, i) => <div key={i} style={{ marginBottom: '5px' }}>{log}</div>)}
             </div>
           )}
         </div>
       )}
 
       {loading ? (
-        <div style={{ textAlign: 'center', padding: '50px', color: '#6B7280' }}>Loading inventory...</div>
+        <div style={{ textAlign: 'center', padding: '50px', color: '#6B7280' }}>Loading...</div>
       ) : filteredProducts.length === 0 ? (
         <div style={{ textAlign: 'center', padding: '50px', color: '#6B7280' }}>
-          <p style={{ fontSize: '18px', marginBottom: '10px' }}>No products yet. Click "+ Add Product" or "📦 Bulk Import" to get started!</p>
+          <p style={{ fontSize: '18px' }}>No products yet. Click "Initial Sync" to import from Shopify!</p>
         </div>
       ) : (
         <div style={{ overflowX: 'auto' }}>
@@ -864,32 +755,11 @@ const InventoryApp = () => {
             <thead>
               <tr style={{ background: '#F3F4F6' }}>
                 <th style={{ padding: '12px', textAlign: 'left', fontWeight: '600', fontSize: '13px', color: '#374151', borderBottom: '2px solid #E5E7EB' }}>
-                  <input
-                    type="checkbox"
-                    onChange={(e) => {
-                      if (e.target.checked) {
-                        setSelectedProducts(new Set(filteredProducts.map(p => p.id)));
-                      } else {
-                        setSelectedProducts(new Set());
-                      }
-                    }}
-                    checked={selectedProducts.size === filteredProducts.length && filteredProducts.length > 0}
-                    style={{ cursor: 'pointer' }}
-                  />
+                  <input type="checkbox" onChange={(e) => e.target.checked ? setSelectedProducts(new Set(filteredProducts.map(p => p.id))) : setSelectedProducts(new Set())} checked={selectedProducts.size === filteredProducts.length && filteredProducts.length > 0} />
                 </th>
-                <th style={{ padding: '12px', textAlign: 'left', fontWeight: '600', fontSize: '13px', color: '#374151', borderBottom: '2px solid #E5E7EB' }}>Product Name</th>
-                <th style={{ padding: '12px', textAlign: 'left', fontWeight: '600', fontSize: '13px', color: '#374151', borderBottom: '2px solid #E5E7EB' }}>Local Name</th>
-                <th style={{ padding: '12px', textAlign: 'left', fontWeight: '600', fontSize: '13px', color: '#374151', borderBottom: '2px solid #E5E7EB' }}>SKU</th>
-                <th style={{ padding: '12px', textAlign: 'center', fontWeight: '600', fontSize: '13px', color: '#374151', borderBottom: '2px solid #E5E7EB' }}>Sellable</th>
-                <th style={{ padding: '12px', textAlign: 'center', fontWeight: '600', fontSize: '13px', color: '#374151', borderBottom: '2px solid #E5E7EB' }}>Unusable</th>
-                <th style={{ padding: '12px', textAlign: 'center', fontWeight: '600', fontSize: '13px', color: '#374151', borderBottom: '2px solid #E5E7EB' }}>Hold</th>
-                <th style={{ padding: '12px', textAlign: 'center', fontWeight: '600', fontSize: '13px', color: '#374151', borderBottom: '2px solid #E5E7EB' }}>Total</th>
-                <th style={{ padding: '12px', textAlign: 'left', fontWeight: '600', fontSize: '13px', color: '#374151', borderBottom: '2px solid #E5E7EB' }}>Design</th>
-                <th style={{ padding: '12px', textAlign: 'left', fontWeight: '600', fontSize: '13px', color: '#374151', borderBottom: '2px solid #E5E7EB' }}>Color</th>
-                <th style={{ padding: '12px', textAlign: 'center', fontWeight: '600', fontSize: '13px', color: '#374151', borderBottom: '2px solid #E5E7EB' }}>Reorder</th>
-                <th style={{ padding: '12px', textAlign: 'left', fontWeight: '600', fontSize: '13px', color: '#374151', borderBottom: '2px solid #E5E7EB' }}>Status</th>
-                <th style={{ padding: '12px', textAlign: 'left', fontWeight: '600', fontSize: '13px', color: '#374151', borderBottom: '2px solid #E5E7EB' }}>Supplier</th>
-                <th style={{ padding: '12px', textAlign: 'center', fontWeight: '600', fontSize: '13px', color: '#374151', borderBottom: '2px solid #E5E7EB' }}>Actions</th>
+                {['Product Name', 'Local Name', 'SKU', 'Sellable', 'Unusable', 'Hold', 'Total', 'Design', 'Color', 'Reorder', 'Status', 'Supplier', 'Actions'].map(h => (
+                  <th key={h} style={{ padding: '12px', textAlign: h.includes('Sellable') || h.includes('Total') ? 'center' : 'left', fontWeight: '600', fontSize: '13px', color: '#374151', borderBottom: '2px solid #E5E7EB' }}>{h}</th>
+                ))}
               </tr>
             </thead>
             <tbody>
@@ -905,14 +775,9 @@ const InventoryApp = () => {
                         checked={selectedProducts.has(product.id)}
                         onChange={(e) => {
                           const newSelected = new Set(selectedProducts);
-                          if (e.target.checked) {
-                            newSelected.add(product.id);
-                          } else {
-                            newSelected.delete(product.id);
-                          }
+                          e.target.checked ? newSelected.add(product.id) : newSelected.delete(product.id);
                           setSelectedProducts(newSelected);
                         }}
-                        style={{ cursor: 'pointer' }}
                       />
                     </td>
                     <td style={{ padding: '12px', fontSize: '14px' }}>{product.product_name}</td>
@@ -929,18 +794,8 @@ const InventoryApp = () => {
                     <td style={{ padding: '12px', fontSize: '14px', color: '#6B7280' }}>{product.supplier || '-'}</td>
                     <td style={{ padding: '12px', textAlign: 'center' }}>
                       <div style={{ display: 'flex', gap: '8px', justifyContent: 'center' }}>
-                        <button
-                          onClick={() => handleEdit(product)}
-                          style={{ padding: '6px 12px', background: '#3B82F6', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}
-                        >
-                          Edit
-                        </button>
-                        <button
-                          onClick={() => handleDelete(product.id)}
-                          style={{ padding: '6px 12px', background: '#EF4444', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}
-                        >
-                          Delete
-                        </button>
+                        <button onClick={() => handleEdit(product)} style={{ padding: '6px 12px', background: '#3B82F6', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>Edit</button>
+                        <button onClick={() => handleDelete(product.id)} style={{ padding: '6px 12px', background: '#EF4444', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>Delete</button>
                       </div>
                     </td>
                   </tr>
