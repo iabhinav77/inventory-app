@@ -288,37 +288,35 @@ const InventoryApp = () => {
     }
   };
 
-  const pushToShopify = async (product) => {
-    if (!shopifyConnected) return;
+    const pushToShopify = async (product) => {
+    if (!shopifyConnected) {
+      alert('Shopify not connected.');
+      return;
+    }
 
     try {
-      const searchResponse = await fetch(`/api/shopify?action=getProducts&title=${encodeURIComponent(product.product_name)}`);
-      if (!searchResponse.ok) throw new Error('Failed to find product');
-
-      const searchData = await searchResponse.json();
-      const shopifyProducts = searchData.products || [];
-      if (shopifyProducts.length === 0) throw new Error('Product not found in Shopify');
-
-      const shopifyProduct = shopifyProducts[0];
-      const variant = shopifyProduct.variants[0];
-      const inventoryItemId = variant.inventory_item_id;
-      
-      const locationsResponse = await fetch('/api/shopify?action=getLocations');
-      if (!locationsResponse.ok) throw new Error('Failed to get locations');
-      
-      const locationsData = await locationsResponse.json();
-      const locationId = locationsData.locations[0]?.id;
-      if (!locationId) throw new Error('No location found');
-
-      const updateResponse = await fetch('/api/shopify?action=updateInventory', {
+      const updateResponse = await fetch('/api/shopify?action=updateInventoryBySKU', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+        },
         body: JSON.stringify({
-          locationId: locationId,
-          inventoryItemId: inventoryItemId,
+          sku: product.sku,
           quantity: product.sellable_stock,
         }),
       });
+
+      if (!updateResponse.ok) {
+        const errorData = await updateResponse.json();
+        throw new Error(errorData.error || 'Failed to update');
+      }
+
+      return true;
+    } catch (error) {
+      console.error('Error pushing to Shopify:', error);
+      throw error;
+    }
+  };
 
       if (!updateResponse.ok) throw new Error('Failed to update inventory');
       return true;
