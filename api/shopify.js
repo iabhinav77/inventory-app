@@ -14,7 +14,7 @@ export default async function handler(req, res) {
 
   const SHOPIFY_STORE_URL = process.env.SHOPIFY_STORE_URL;
   const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
-  const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || '2025-01';
+  const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || '2026-01';
 
   if (action === 'checkConnection') {
     const connected = !!(SHOPIFY_STORE_URL && SHOPIFY_ACCESS_TOKEN);
