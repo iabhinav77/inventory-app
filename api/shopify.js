@@ -9,7 +9,6 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
-
   const { action, since } = req.query;
 
   const SHOPIFY_STORE_URL = process.env.SHOPIFY_STORE_URL;
