@@ -66,19 +66,18 @@ export default async function handler(req, res) {
     }
     
     // SIMPLIFIED: Update inventory by SKU (all in one call)
-    else if (action === 'updateInventoryBySKU') {
-      const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
-      const { sku, quantity } = body;
+    fetch('/api/shopify', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+  },
+  body: JSON.stringify({
+    action: 'updateInventoryBySKU',
+    sku: product.sku,
+    quantity: product.sellable_stock,
+  }),
+});
 
-      // Step 1: Get ALL products and find the one with matching SKU
-      const productsUrl = `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/products.json?limit=250`;
-      
-      const productsResponse = await fetch(productsUrl, {
-        headers: {
-          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
-          'Content-Type': 'application/json',
-        },
-      });
 
       if (!productsResponse.ok) {
         const errorText = await productsResponse.text();
