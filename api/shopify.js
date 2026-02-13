@@ -9,11 +9,12 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
+
   const { action, since } = req.query;
 
   const SHOPIFY_STORE_URL = process.env.SHOPIFY_STORE_URL;
   const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
-  const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || '2026-01';
+  const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || '2025-01';
 
   if (action === 'checkConnection') {
     const connected = !!(SHOPIFY_STORE_URL && SHOPIFY_ACCESS_TOKEN);
@@ -66,17 +67,20 @@ export default async function handler(req, res) {
     }
     
     // SIMPLIFIED: Update inventory by SKU (all in one call)
-    fetch('/api/shopify', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        action: 'updateInventoryBySKU',
-        sku: product.sku,
-        quantity: product.sellable_stock,
-      }),
-    });
+    else if (action === 'updateInventoryBySKU') {
+      const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+      const { sku, quantity } = body;
+
+      // Step 1: Get ALL products and find the one with matching SKU
+      const productsUrl = `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/products.json?limit=250`;
+      
+      const productsResponse = await fetch(productsUrl, {
+        headers: {
+          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+          'Content-Type': 'application/json',
+        },
+      });
+
       if (!productsResponse.ok) {
         const errorText = await productsResponse.text();
         return res.status(productsResponse.status).json({ error: `Failed to get products: ${errorText}` });
