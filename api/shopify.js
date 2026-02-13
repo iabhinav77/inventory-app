@@ -67,18 +67,16 @@ export default async function handler(req, res) {
     
     // SIMPLIFIED: Update inventory by SKU (all in one call)
     fetch('/api/shopify', {
-  method: 'POST',
-  headers: {
-    'Content-Type': 'application/json',
-  },
-  body: JSON.stringify({
-    action: 'updateInventoryBySKU',
-    sku: product.sku,
-    quantity: product.sellable_stock,
-  }),
-});
-
-
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        action: 'updateInventoryBySKU',
+        sku: product.sku,
+        quantity: product.sellable_stock,
+      }),
+    });
       if (!productsResponse.ok) {
         const errorText = await productsResponse.text();
         return res.status(productsResponse.status).json({ error: `Failed to get products: ${errorText}` });
