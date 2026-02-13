@@ -288,7 +288,8 @@ const InventoryApp = () => {
     }
   };
 
-    const pushToShopify = async (product) => {
+  // SIMPLIFIED PUSH TO SHOPIFY
+  const pushToShopify = async (product) => {
     if (!shopifyConnected) {
       alert('Shopify not connected.');
       return;
@@ -314,13 +315,6 @@ const InventoryApp = () => {
       return true;
     } catch (error) {
       console.error('Error pushing to Shopify:', error);
-      throw error;
-    }
-  };
-
-      if (!updateResponse.ok) throw new Error('Failed to update inventory');
-      return true;
-    } catch (error) {
       throw error;
     }
   };
@@ -745,7 +739,7 @@ const InventoryApp = () => {
         <div style={{ textAlign: 'center', padding: '50px', color: '#6B7280' }}>Loading...</div>
       ) : filteredProducts.length === 0 ? (
         <div style={{ textAlign: 'center', padding: '50px', color: '#6B7280' }}>
-          <p style={{ fontSize: '18px' }}>No products yet. Click "Initial Sync" to import from Shopify!</p>
+          <p style={{ fontSize: '18px' }}>No products yet. {products.length === 0 ? 'Click "Initial Sync" to import from Shopify!' : 'Try adjusting your filters.'}</p>
         </div>
       ) : (
         <div style={{ overflowX: 'auto' }}>
