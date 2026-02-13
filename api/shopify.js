@@ -1,5 +1,3 @@
-// api/shopify.js - SIMPLIFIED VERSION
-
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Credentials', true);
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -26,7 +24,6 @@ export default async function handler(req, res) {
   }
 
   try {
-    // Get all products from Shopify
     if (action === 'getAllProducts') {
       const url = `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/products.json?limit=250`;
       
@@ -46,7 +43,6 @@ export default async function handler(req, res) {
       return res.status(200).json(data);
     }
     
-    // Get orders
     if (action === 'getOrders') {
       const url = `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/orders.json?status=any&created_at_min=${since}&limit=250`;
       
@@ -66,12 +62,10 @@ export default async function handler(req, res) {
       return res.status(200).json(data);
     }
     
-    // Update inventory by product name (more reliable than SKU)
     else if (action === 'updateInventoryBySKU') {
       const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
       const { sku, quantity, product_name } = body;
 
-      // Get ALL products from Shopify
       const productsUrl = `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/products.json?limit=250`;
       
       const productsResponse = await fetch(productsUrl, {
@@ -88,12 +82,10 @@ export default async function handler(req, res) {
 
       const productsData = await productsResponse.json();
       
-      // Find product by name (more reliable than SKU)
       let inventoryItemId = null;
       let foundProduct = null;
       
       for (const product of productsData.products || []) {
-        // Match by product name (case insensitive)
         if (product.title.toLowerCase() === product_name.toLowerCase()) {
           inventoryItemId = product.variants[0].inventory_item_id;
           foundProduct = product.title;
@@ -107,7 +99,6 @@ export default async function handler(req, res) {
         });
       }
 
-      // Step 2: Get location
       const locationsUrl = `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/locations.json`;
       
       const locationsResponse = await fetch(locationsUrl, {
@@ -129,7 +120,6 @@ export default async function handler(req, res) {
         return res.status(404).json({ error: 'No location found in Shopify' });
       }
 
-      // Step 3: Update inventory
       const updateUrl = `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/inventory_levels/set.json`;
       
       const updateResponse = await fetch(updateUrl, {
