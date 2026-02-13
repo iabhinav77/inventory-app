@@ -18,6 +18,9 @@ const InventoryApp = () => {
   const [selectedProducts, setSelectedProducts] = useState(new Set());
   const [importMode, setImportMode] = useState('add');
   const [importLog, setImportLog] = useState([]);
+  const [lastSyncTime, setLastSyncTime] = useState(null);
+  const [syncing, setSyncing] = useState(false);
+  const [shopifyConnected, setShopifyConnected] = useState(false);
   
   const [formData, setFormData] = useState({
     product_name: '',
@@ -34,7 +37,33 @@ const InventoryApp = () => {
 
   useEffect(() => {
     fetchProducts();
+    checkShopifyConnection();
+    loadLastSyncTime();
   }, []);
+
+  const checkShopifyConnection = async () => {
+    try {
+      const response = await fetch('/api/shopify?action=checkConnection');
+      const data = await response.json();
+      setShopifyConnected(data.connected || false);
+    } catch (error) {
+      console.error('Error checking Shopify connection:', error);
+      setShopifyConnected(false);
+    }
+  };
+
+  const loadLastSyncTime = () => {
+    const savedTime = localStorage.getItem('lastShopifySync');
+    if (savedTime) {
+      setLastSyncTime(new Date(savedTime));
+    }
+  };
+
+  const saveLastSyncTime = () => {
+    const now = new Date();
+    localStorage.setItem('lastShopifySync', now.toISOString());
+    setLastSyncTime(now);
+  };
 
   const fetchProducts = async () => {
     try {
@@ -53,6 +82,210 @@ const InventoryApp = () => {
       setLoading(false);
     }
   };
+
+  // ============================================
+  // SHOPIFY INTEGRATION FUNCTIONS
+  // ============================================
+
+  const syncFromShopify = async () => {
+    if (!shopifyConnected) {
+      alert('Shopify not connected. Please configure Shopify credentials in Vercel environment variables.');
+      return;
+    }
+
+    try {
+      setSyncing(true);
+      const log = [];
+      
+      const sinceDate = lastSyncTime 
+        ? lastSyncTime.toISOString() 
+        : new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+
+      log.push(`🔍 Fetching orders since ${new Date(sinceDate).toLocaleString()}...`);
+      
+      const response = await fetch(`/api/shopify?action=getOrders&since=${encodeURIComponent(sinceDate)}`);
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || `API error: ${response.status}`);
+      }
+
+      const data = await response.json();
+      const orders = data.orders || [];
+      
+      log.push(`📦 Found ${orders.length} orders`);
+
+      let processedCount = 0;
+      let notFoundCount = 0;
+
+      for (const order of orders) {
+        for (const item of order.line_items) {
+          const quantity = item.quantity;
+          const sku = item.sku;
+          const productName = item.name;
+
+          let product = null;
+
+          if (sku && sku.trim() !== '') {
+            const { data: productData } = await supabase
+              .from('inventory')
+              .select('*')
+              .eq('sku', sku)
+              .single();
+            product = productData;
+          }
+
+          if (!product && productName) {
+            const { data: productData } = await supabase
+              .from('inventory')
+              .select('*')
+              .ilike('product_name', `%${productName}%`)
+              .limit(1)
+              .single();
+            product = productData;
+          }
+
+          if (product) {
+            const newStock = Math.max(0, product.sellable_stock - quantity);
+            
+            await supabase
+              .from('inventory')
+              .update({ sellable_stock: newStock })
+              .eq('id', product.id);
+            
+            log.push(`✅ ${product.product_name}: Sold ${quantity}, New stock: ${newStock}`);
+            processedCount++;
+          } else {
+            log.push(`❌ "${productName}" (SKU: ${sku || 'none'}): Not found in inventory`);
+            notFoundCount++;
+          }
+        }
+      }
+
+      saveLastSyncTime();
+      setImportLog(log);
+      
+      let message = `✅ Sync complete!\n\n`;
+      message += `📥 Processed ${processedCount} items from ${orders.length} orders\n`;
+      if (notFoundCount > 0) {
+        message += `⚠️ ${notFoundCount} items not found in inventory`;
+      }
+      
+      alert(message);
+      fetchProducts();
+      
+    } catch (error) {
+      console.error('Error syncing from Shopify:', error);
+      alert(`Error syncing from Shopify: ${error.message}\n\nCheck console for details.`);
+      setImportLog([`❌ Error: ${error.message}`]);
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const pushToShopify = async (product) => {
+    if (!shopifyConnected) {
+      alert('Shopify not connected.');
+      return;
+    }
+
+    try {
+      const searchResponse = await fetch(`/api/shopify?action=getProducts&title=${encodeURIComponent(product.product_name)}`);
+      
+      if (!searchResponse.ok) {
+        throw new Error('Failed to find product in Shopify');
+      }
+
+      const searchData = await searchResponse.json();
+      const shopifyProducts = searchData.products || [];
+
+      if (shopifyProducts.length === 0) {
+        throw new Error('Product not found in Shopify');
+      }
+
+      const shopifyProduct = shopifyProducts[0];
+      const variant = shopifyProduct.variants[0];
+      const inventoryItemId = variant.inventory_item_id;
+      
+      const locationsResponse = await fetch('/api/shopify?action=getLocations');
+      
+      if (!locationsResponse.ok) {
+        throw new Error('Failed to get Shopify locations');
+      }
+      
+      const locationsData = await locationsResponse.json();
+      const locationId = locationsData.locations[0]?.id;
+
+      if (!locationId) {
+        throw new Error('No location found in Shopify');
+      }
+
+      const updateResponse = await fetch('/api/shopify?action=updateInventory', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          locationId: locationId,
+          inventoryItemId: inventoryItemId,
+          quantity: product.sellable_stock,
+        }),
+      });
+
+      if (!updateResponse.ok) {
+        throw new Error('Failed to update inventory in Shopify');
+      }
+
+      return true;
+    } catch (error) {
+      console.error('Error pushing to Shopify:', error);
+      throw error;
+    }
+  };
+
+  const bulkPushToShopify = async () => {
+    if (!shopifyConnected) {
+      alert('Shopify not connected.');
+      return;
+    }
+
+    if (!confirm('This will update ALL products in Shopify with your current inventory levels. Continue?')) {
+      return;
+    }
+
+    try {
+      setSyncing(true);
+      const log = [];
+      let successCount = 0;
+      let failCount = 0;
+
+      for (const product of products) {
+        try {
+          await pushToShopify(product);
+          log.push(`✅ ${product.product_name}: Updated to ${product.sellable_stock} units`);
+          successCount++;
+        } catch (error) {
+          log.push(`❌ ${product.product_name}: ${error.message}`);
+          failCount++;
+        }
+        
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+
+      setImportLog(log);
+      alert(`Push complete!\n\n✅ Success: ${successCount}\n❌ Failed: ${failCount}`);
+      
+    } catch (error) {
+      console.error('Error bulk pushing to Shopify:', error);
+      alert(`Error: ${error.message}`);
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  // ============================================
+  // END SHOPIFY INTEGRATION
+  // ============================================
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -308,11 +541,29 @@ const InventoryApp = () => {
     sellableUnits: products.reduce((sum, p) => sum + p.sellable_stock, 0)
   };
 
+  const formatTimeSince = (date) => {
+    if (!date) return 'Never';
+    const seconds = Math.floor((new Date() - date) / 1000);
+    if (seconds < 60) return 'Just now';
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    return `${days}d ago`;
+  };
+
   return (
     <div style={{ fontFamily: 'system-ui, sans-serif', padding: '20px', maxWidth: '1400px', margin: '0 auto' }}>
       <div style={{ marginBottom: '30px' }}>
         <h1 style={{ margin: '0 0 5px 0', fontSize: '28px' }}>Authority of Fashion - Inventory Management</h1>
         <p style={{ margin: 0, color: '#666' }}>Track saree inventory with multi-category stock management</p>
+        {shopifyConnected && (
+          <div style={{ marginTop: '10px', display: 'flex', alignItems: 'center', gap: '15px', fontSize: '14px' }}>
+            <span style={{ color: '#059669', fontWeight: '500' }}>✓ Shopify Connected</span>
+            <span style={{ color: '#666' }}>Last synced: {formatTimeSince(lastSyncTime)}</span>
+          </div>
+        )}
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '15px', marginBottom: '25px' }}>
@@ -352,6 +603,26 @@ const InventoryApp = () => {
         <button onClick={() => setShowBulkImport(!showBulkImport)} style={{ padding: '10px 20px', background: '#0891B2', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: '500' }}>
           📦 Bulk Import
         </button>
+
+        {shopifyConnected && (
+          <>
+            <button 
+              onClick={syncFromShopify} 
+              disabled={syncing}
+              style={{ padding: '10px 20px', background: syncing ? '#9CA3AF' : '#2563EB', color: 'white', border: 'none', borderRadius: '6px', cursor: syncing ? 'not-allowed' : 'pointer', fontWeight: '500' }}
+            >
+              {syncing ? '⏳ Syncing...' : '🔄 Sync from Shopify'}
+            </button>
+            
+            <button 
+              onClick={bulkPushToShopify} 
+              disabled={syncing}
+              style={{ padding: '10px 20px', background: syncing ? '#9CA3AF' : '#7C3AED', color: 'white', border: 'none', borderRadius: '6px', cursor: syncing ? 'not-allowed' : 'pointer', fontWeight: '500' }}
+            >
+              {syncing ? '⏳ Pushing...' : '↗️ Push to Shopify'}
+            </button>
+          </>
+        )}
         
         <button onClick={exportToCSV} style={{ padding: '10px 20px', background: 'white', color: '#374151', border: '2px solid #E5E7EB', borderRadius: '6px', cursor: 'pointer', fontWeight: '500' }}>
           ↓ Export CSV
