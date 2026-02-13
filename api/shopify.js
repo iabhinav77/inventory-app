@@ -66,12 +66,12 @@ export default async function handler(req, res) {
       return res.status(200).json(data);
     }
     
-    // SIMPLIFIED: Update inventory by SKU (all in one call)
+    // Update inventory by product name (more reliable than SKU)
     else if (action === 'updateInventoryBySKU') {
       const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
-      const { sku, quantity } = body;
+      const { sku, quantity, product_name } = body;
 
-      // Step 1: Get ALL products and find the one with matching SKU
+      // Get ALL products from Shopify
       const productsUrl = `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/products.json?limit=250`;
       
       const productsResponse = await fetch(productsUrl, {
@@ -88,20 +88,23 @@ export default async function handler(req, res) {
 
       const productsData = await productsResponse.json();
       
-      // Find product with matching SKU
+      // Find product by name (more reliable than SKU)
       let inventoryItemId = null;
+      let foundProduct = null;
+      
       for (const product of productsData.products || []) {
-        for (const variant of product.variants || []) {
-          if (variant.sku === sku) {
-            inventoryItemId = variant.inventory_item_id;
-            break;
-          }
+        // Match by product name (case insensitive)
+        if (product.title.toLowerCase() === product_name.toLowerCase()) {
+          inventoryItemId = product.variants[0].inventory_item_id;
+          foundProduct = product.title;
+          break;
         }
-        if (inventoryItemId) break;
       }
 
       if (!inventoryItemId) {
-        return res.status(404).json({ error: `Product with SKU ${sku} not found in Shopify` });
+        return res.status(404).json({ 
+          error: `Product "${product_name}" not found in Shopify. Try syncing products again.` 
+        });
       }
 
       // Step 2: Get location
